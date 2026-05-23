@@ -57,6 +57,14 @@
     }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+    /* プレイ中人数ラベル */
+    .playing-now {
+      display: none; align-items: center; gap: 4px;
+      font-size: 11px; color: var(--live); font-weight: 700;
+      background: rgba(74, 222, 128, 0.1); padding: 2px 8px; border-radius: 4px;
+      margin-top: 4px; width: fit-content;
+    }
+
     /* ツールバー */
     .toolbar{display:flex;flex-direction:column;gap:12px}
     .search-wrap{position:relative}
@@ -150,7 +158,6 @@
           <div class="tagline"><div class="spark"></div>リアルタイム・人気ランキング</div>
         </div>
       </div>
-      <!-- 同時接続数表示 -->
       <div class="live-count-wrap" title="現在このページを見ているユーザー数">
         <div class="live-dot"></div>
         LIVE: <span id="onlineCount">1</span> users
@@ -190,7 +197,6 @@
   </div>
 
   <script>
-    // ── 1. 設定 ──
     const SUPABASE_URL = 'https://vddbnttozxrvhjyzqgps.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZkZGJudHRvenhydmhqeXpxZ3BzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzMDczMjgsImV4cCI6MjA5NDg4MzMyOH0.XgN7PLFpstChezT_uoE06D3I4Yki6zMnKsI245smyPQ';
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -198,11 +204,11 @@
     const $ = id => document.getElementById(id);
     let allGames = [];
     let gameStats = {}; 
+    let playingCounts = {}; // 各ゲームの現在プレイ人数
     let activeGenre = 'all';
     let activeSort = 'popular';
     let activeSearch = '';
 
-    // UUID取得
     const getClientId = () => {
       let id = localStorage.getItem('min_tube_uid');
       if(!id) { id = crypto.randomUUID(); localStorage.setItem('min_tube_uid', id); }
@@ -210,25 +216,22 @@
     };
     const uid = getClientId();
 
-    // ── 2. データ取得 & リアルタイム設定 ──
     async function init() {
       try {
         const res = await fetch('games.json');
         allGames = await res.json();
 
-        // 初回ランキング数値取得
         const { data: stats } = await supabaseClient.from('game_rankings').select('game_key, play_count');
         stats?.forEach(s => gameStats[s.game_key] = parseInt(s.play_count));
 
         render();
         setupRealtime();
-        setupPresence(); // 同時接続数監視
+        setupPresence(); 
       } catch (e) {
         console.error(e);
       }
     }
 
-    // ランキング数値のリアルタイム監視
     function setupRealtime() {
       supabaseClient
         .channel('db_changes')
@@ -242,26 +245,50 @@
         .subscribe();
     }
 
-    // ── 3. 同時接続数 (Presence) ──
     function setupPresence() {
-      const channel = supabaseClient.channel('online-users', {
+      const channel = supabaseClient.channel('global-presence', {
         config: { presence: { key: uid } }
       });
 
       channel
         .on('presence', { event: 'sync' }, () => {
           const state = channel.presenceState();
-          const count = Object.keys(state).length; // ユニークなUUIDの数
-          $('onlineCount').innerText = count;
+          
+          // 全体人数
+          $('onlineCount').innerText = Object.keys(state).length;
+
+          // ゲームごとのプレイ人数を集計
+          playingCounts = {};
+          Object.values(state).forEach(presences => {
+            presences.forEach(p => {
+              if (p.playing) {
+                playingCounts[p.playing] = (playingCounts[p.playing] || 0) + 1;
+              }
+            });
+          });
+          updatePlayingBadges();
         })
         .subscribe(async (status) => {
           if (status === 'SUBSCRIBED') {
-            await channel.track({ online_at: new Date().toISOString() });
+            await channel.track({ online_at: new Date().toISOString(), playing: null });
           }
         });
     }
 
-    // ── 4. プレイ処理 ──
+    function updatePlayingBadges() {
+      allGames.forEach(g => {
+        const el = $(`playing-${g.key}`);
+        if (!el) return;
+        const count = playingCounts[g.key] || 0;
+        if (count > 0) {
+          el.innerHTML = `<div class="live-dot" style="width:6px;height:6px;margin-right:4px"></div> ${count}人がプレイ中`;
+          el.style.display = 'flex';
+        } else {
+          el.style.display = 'none';
+        }
+      });
+    }
+
     async function play(key) {
       await supabaseClient.rpc('increment_game_play', { 
         target_game_key: key, 
@@ -270,7 +297,6 @@
       window.location.href = `play.html?game=${key}`;
     }
 
-    // ── 5. メイン描画 ──
     function render() {
       const grid = $('gameGrid');
       const query = activeSearch.toLowerCase();
@@ -289,7 +315,7 @@
           return a.name.localeCompare(b.name, 'ja', {numeric: true});
         }
         if(activeSort === 'name-asc') return a.name.localeCompare(b.name, 'ja', {numeric: true});
-        return b.name.localeCompare(na,'ja', {numeric: true});
+        return b.name.localeCompare(a.name,'ja', {numeric: true});
       });
 
       grid.innerHTML = '';
@@ -317,6 +343,9 @@
               <span class="card-title">${g.name}</span>
               <span class="play-count" id="count-${g.key}">${count} played</span>
             </div>
+            <!-- プレイ中人数表示 -->
+            <div class="playing-now" id="playing-${g.key}"></div>
+            
             <div class="card-desc">${g.desc}</div>
             <div class="card-footer">
               <span><span class="status-dot done"></span>${g.genreLabel}</span>
@@ -328,10 +357,10 @@
         grid.appendChild(card);
       });
 
+      updatePlayingBadges();
       $('countBar').innerHTML = `<span>${filtered.length}</span> 件のゲーム`;
     }
 
-    // ── 6. イベント制御 ──
     let timer;
     const debounceRender = () => { clearTimeout(timer); timer = setTimeout(render, 1000); };
 
